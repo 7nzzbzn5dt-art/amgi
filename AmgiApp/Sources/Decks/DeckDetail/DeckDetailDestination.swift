@@ -29,6 +29,7 @@ enum DeckDetailSheet: Identifiable {
 @CasePathable
 enum DeckDetailAlert {
     case empty
+    case resetEntireDeck
     case error(String)
     case info(String)
     case subdeck

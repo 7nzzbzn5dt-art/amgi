@@ -82,7 +82,12 @@ struct AddNoteContent: View {
                         Text(name)
                             .amgiFont(.caption)
                             .foregroundStyle(palette.textSecondary)
-                        RichNoteFieldEditor(htmlText: model.fieldBinding(for: index))
+                        RichNoteFieldEditor(
+                            htmlText: model.fieldBinding(for: index),
+                            preservesSourceHTML: index < model.fieldValues.count
+                                && model.fieldValues[index].range(of: "<img", options: .caseInsensitive) != nil
+                        )
+                        PhotoAttachmentButton(htmlText: model.fieldBinding(for: index))
                     }
                 }
             }
