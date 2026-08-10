@@ -1,49 +1,84 @@
-name: Agent Custom Study Dispatcher
+name: Agent Custom Study Build
 
 on:
   pull_request:
-    types: [opened]
+    types: [reopened]
 
 permissions:
-  contents: write
-  actions: write
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  apply-and-dispatch:
+  build:
     if: github.event.pull_request.head.ref == 'agent/custom-study-tools'
-    runs-on: ubuntu-latest
+    runs-on: macos-26
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - name: Select Xcode 26.3
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.3'
+
+      - name: Show versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Checkout feature branch with submodules
+        uses: actions/checkout@v4
         with:
           ref: agent/custom-study-tools
-          fetch-depth: 0
+          submodules: recursive
 
-      - name: Extract and run patch payload
-        run: |
-          awk '
-            /python3 <<'"'"'PY'"'"'/ { capture=1; next }
-            capture && /^          PY$/ { capture=0; exit }
-            capture { sub(/^          /, ""); print }
-          ' .github/workflows/apply-custom-study-tools.yml > /tmp/apply.py
-          python3 /tmp/apply.py
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95'
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
 
-      - name: Commit feature implementation
-        id: commit
-        env:
-          BRANCH: agent/custom-study-tools
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/workflows/apply-custom-study-tools.yml
-          git add -A
-          git commit -m "feat: add media, deck reset, and instant review"
-          git push origin HEAD:"$BRANCH"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Install Rust nightly with rust-src
+        run: rustup toolchain install nightly --profile minimal --component rust-src
 
-      - name: Dispatch iOS build
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BRANCH: agent/custom-study-tools
+      - name: Install build dependencies
+        run: brew install protobuf swift-protobuf xcodegen
+
+      - name: Build Rust XCFramework
         run: |
-          gh workflow run build-ipa.yml --ref "$BRANCH"
-          echo "Dispatched build for ${{ steps.commit.outputs.sha }}"
+          chmod +x ./scripts/build-xcframework.sh
+          ./scripts/build-xcframework.sh
+
+      - name: Generate Swift protobuf types
+        run: |
+          chmod +x ./scripts/generate-protos.sh
+          ./scripts/generate-protos.sh
+
+      - name: Generate Xcode project
+        run: cd AmgiApp && xcodegen generate
+
+      - name: Compile Debug simulator target
+        run: |
+          set -o pipefail
+          DERIVED_DATA_PATH="$RUNNER_TEMP/DerivedData"
+          if xcodebuild -list -project AmgiApp/AmgiApp.xcodeproj | grep -q "AmgiAppTests"; then
+            xcodebuild build-for-testing \
+              -project AmgiApp/AmgiApp.xcodeproj \
+              -scheme AmgiApp \
+              -configuration Debug \
+              -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
+              -derivedDataPath "$DERIVED_DATA_PATH" \
+              -skipPackagePluginValidation \
+              -skipMacroValidation \
+              2>&1 | tee simulator-build.log
+          else
+            xcodebuild build \
+              -project AmgiApp/AmgiApp.xcodeproj \
+              -scheme AmgiApp \
+              -configuration Debug \
+              -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
+              -derivedDataPath "$DERIVED_DATA_PATH" \
+              -skipPackagePluginValidation \
+              -skipMacroValidation \
+              2>&1 | tee simulator-build.log
+          fi
