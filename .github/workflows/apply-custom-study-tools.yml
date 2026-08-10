@@ -1,0 +1,360 @@
+name: Apply Custom Study Tools
+
+on:
+  push:
+    branches:
+      - agent/custom-study-tools
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/custom-study-tools
+          fetch-depth: 0
+
+      - name: Apply source changes
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new, count=1):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"expected text not found in {path}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, count))
+
+          # 1) No artificial reviewer delays.
+          replace(
+              "AmgiApp/Sources/Review/ReviewSession.swift",
+              '''            // The toast stays up at least this long; the next card appears\n            // after max(backend round-trip, toast display).\n            let minToastDisplay = Task { try? await Task.sleep(for: .milliseconds(450)) }\n''',
+              ""
+          )
+          p = Path("AmgiApp/Sources/Review/ReviewSession.swift")
+          text = p.read_text()
+          if text.count("                await minToastDisplay.value\n") != 2:
+              raise SystemExit("expected exactly two minToastDisplay awaits")
+          p.write_text(text.replace("                await minToastDisplay.value\n", ""))
+
+          Path("AmgiApp/Sources/Review/FlipContainer.swift").write_text('''import SwiftUI
+
+/// Immediate answer reveal for the native card surface.
+///
+/// Both reveal and reset deliberately disable animation so the visible side
+/// follows `showBack` with zero artificial transition time.
+struct FlipContainer<Content: View>: View {
+    let showBack: Bool
+    @ViewBuilder let content: (_ isBack: Bool) -> Content
+
+    var body: some View {
+        content(showBack)
+            .id(showBack)
+            .transaction { transaction in
+                transaction.disablesAnimations = true
+            }
+    }
+}
+''')
+
+          # 2) Backend requests used by photo import and full-deck reset.
+          Path("Sources/AnkiProtoBridge/Requests/CardSearchRequests.swift").write_text('''import Foundation
+public import AnkiBackend
+public import AnkiKit
+import AnkiProto
+import SwiftProtobuf
+
+extension Request where Response == [CardID] {
+    /// Runs an Anki card search and returns matching card IDs.
+    public static func searchCardIds(query: String) -> Self {
+        Self(
+            serviceId: ServiceID.search,
+            methodId: SearchMethod.searchCards,
+            encode: {
+                var proto = Anki_Search_SearchRequest()
+                proto.search = query.isEmpty ? "deck:*" : query
+                return try proto.serializedData()
+            },
+            decode: { bytes in
+                let response = try Anki_Search_SearchResponse(serializedBytes: bytes)
+                return response.ids.map(CardID.init)
+            }
+        )
+    }
+}
+''')
+
+          Path("Sources/AnkiProtoBridge/Requests/MediaAddRequests.swift").write_text('''import Foundation
+public import AnkiBackend
+public import AnkiKit
+import AnkiProto
+import SwiftProtobuf
+
+extension Request where Response == String {
+    /// Adds bytes through Anki's media service and returns the actual stored
+    /// filename (the backend may rename it to avoid a collision).
+    public static func addMediaFile(data: Data, desiredName: String) -> Self {
+        Self(
+            serviceId: ServiceID.media,
+            methodId: MediaMethod.addMediaFile,
+            encode: {
+                var proto = Anki_Media_AddMediaFileRequest()
+                proto.desiredName = desiredName
+                proto.data = data
+                return try proto.serializedData()
+            },
+            decode: { bytes in
+                try Anki_Generic_String(serializedBytes: bytes).val
+            }
+        )
+    }
+}
+''')
+
+          Path("Sources/AnkiClients/MediaImportClient.swift").write_text('''import AnkiBackend
+import AnkiKit
+import AnkiProtoBridge
+public import Dependencies
+import DependenciesMacros
+import Foundation
+
+@DependencyClient
+public struct MediaImportClient: Sendable {
+    public var add: @Sendable (_ data: Data, _ desiredName: String) async throws -> String
+}
+
+extension MediaImportClient: DependencyKey {
+    public static let liveValue: Self = {
+        @Dependency(\\.ankiBackend) var backend
+        return Self(
+            add: { data, desiredName in
+                try await backend.invoke(.addMediaFile(data: data, desiredName: desiredName))
+            }
+        )
+    }()
+}
+
+extension MediaImportClient: TestDependencyKey {
+    public static let testValue = MediaImportClient()
+}
+
+extension DependencyValues {
+    public var mediaImportClient: MediaImportClient {
+        get { self[MediaImportClient.self] }
+        set { self[MediaImportClient.self] = newValue }
+    }
+}
+''')
+
+          Path("Sources/AnkiClients/DeckResetClient.swift").write_text('''import AnkiBackend
+import AnkiKit
+import AnkiProtoBridge
+public import Dependencies
+import DependenciesMacros
+
+@DependencyClient
+public struct DeckResetClient: Sendable {
+    /// Resets every card matched by the deck search to Anki's New state and
+    /// returns the number of cards changed.
+    public var resetEntireDeck: @Sendable (_ deckName: String) async throws -> Int
+}
+
+extension DeckResetClient: DependencyKey {
+    public static let liveValue: Self = {
+        @Dependency(\\.ankiBackend) var backend
+        return Self(
+            resetEntireDeck: { deckName in
+                try await backendOffload {
+                    let escaped = deckName
+                        .replacingOccurrences(of: "\\\\", with: "\\\\\\\\")
+                        .replacingOccurrences(of: "\\\"", with: "\\\\\\\"")
+                    let cardIds = try backend.invoke(.searchCardIds(query: "deck:\\\"\\(escaped)\\\""))
+                    guard !cardIds.isEmpty else { return 0 }
+                    try backend.invoke(.scheduleCardsAsNew(cardIds: cardIds, log: true))
+                    return cardIds.count
+                }
+            }
+        )
+    }()
+}
+
+extension DeckResetClient: TestDependencyKey {
+    public static let testValue = DeckResetClient()
+}
+
+extension DependencyValues {
+    public var deckResetClient: DeckResetClient {
+        get { self[DeckResetClient.self] }
+        set { self[DeckResetClient.self] = newValue }
+    }
+}
+''')
+
+          # 3) Photo picker for ordinary Add/Edit Note fields.
+          Path("AmgiApp/Sources/Browse/PhotoAttachmentButton.swift").write_text('''import AnkiClients
+import Dependencies
+import Foundation
+import PhotosUI
+import SwiftUI
+import UIKit
+
+struct PhotoAttachmentButton: View {
+    @Binding var htmlText: String
+
+    @Dependency(\\.mediaImportClient) private var mediaImportClient
+    @State private var selectedItem: PhotosPickerItem?
+    @State private var isImporting = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            PhotosPicker(selection: $selectedItem, matching: .images) {
+                Label(isImporting ? "Adding Image..." : "Add Image", systemImage: "photo.badge.plus")
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .disabled(isImporting)
+            .onChange(of: selectedItem) { _, newItem in
+                guard let newItem else { return }
+                Task { await importPhoto(newItem) }
+            }
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    @MainActor
+    private func importPhoto(_ item: PhotosPickerItem) async {
+        isImporting = true
+        errorMessage = nil
+        defer {
+            isImporting = false
+            selectedItem = nil
+        }
+
+        do {
+            guard let sourceData = try await item.loadTransferable(type: Data.self),
+                  let image = UIImage(data: sourceData),
+                  let jpegData = image.jpegData(compressionQuality: 0.92) else {
+                throw PhotoAttachmentError.unreadableImage
+            }
+
+            let desiredName = "amgi-\\(UUID().uuidString).jpg"
+            let storedName = try await mediaImportClient.add(jpegData, desiredName)
+            let escapedName = storedName
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "\\\"", with: "&quot;")
+            let imageTag = "<img src=\\\"\\(escapedName)\\\">"
+            htmlText += htmlText.isEmpty ? imageTag : "<br>\\(imageTag)"
+        } catch {
+            errorMessage = "Could not attach image: \\(error.localizedDescription)"
+        }
+    }
+}
+
+private enum PhotoAttachmentError: LocalizedError {
+    case unreadableImage
+
+    var errorDescription: String? {
+        "The selected photo could not be converted to an image."
+    }
+}
+''')
+
+          field_editor_old = '''                        RichNoteFieldEditor(htmlText: model.fieldBinding(for: index))\n'''
+          field_editor_new = '''                        RichNoteFieldEditor(\n                            htmlText: model.fieldBinding(for: index),\n                            preservesSourceHTML: index < model.fieldValues.count\n                                && model.fieldValues[index].range(of: "<img", options: .caseInsensitive) != nil\n                        )\n                        PhotoAttachmentButton(htmlText: model.fieldBinding(for: index))\n'''
+          replace("AmgiApp/Sources/Browse/AddNoteView.swift", field_editor_old, field_editor_new)
+          replace("AmgiApp/Sources/Browse/NoteEditorView.swift", field_editor_old, field_editor_new)
+
+          # 4) Deck detail menu + confirmation + model operation.
+          replace(
+              "AmgiApp/Sources/Decks/DeckDetail/DeckDetailDestination.swift",
+              '''enum DeckDetailAlert {\n    case empty\n''',
+              '''enum DeckDetailAlert {\n    case empty\n    case resetEntireDeck\n'''
+          )
+
+          replace(
+              "AmgiApp/Sources/Decks/DeckDetail/DeckDetailView.swift",
+              '''        case .empty: return "Empty \\"\\(shortTitle)\\"?"\n        case .error: return "Something went wrong"\n''',
+              '''        case .empty: return "Empty \\"\\(shortTitle)\\"?"\n        case .resetEntireDeck: return "Reset \\"\\(shortTitle)\\"?"\n        case .error: return "Something went wrong"\n'''
+          )
+
+          replace(
+              "AmgiApp/Sources/Decks/DeckDetail/DeckDetailView.swift",
+              '''                Divider()\n                Button {\n                    destination = .importer\n''',
+              '''                Divider()\n                Button(role: .destructive) {\n                    destination = .alert(.resetEntireDeck)\n                } label: {\n                    Label("Reset Entire Deck", systemImage: "arrow.counterclockwise")\n                }\n                .disabled(model.actionInFlight || model.counts.total == 0)\n                Divider()\n                Button {\n                    destination = .importer\n'''
+          )
+
+          replace(
+              "AmgiApp/Sources/Decks/DeckDetail/DeckDetailView.swift",
+              '''        case .empty:\n            Button("Empty", role: .destructive) {\n                Task { await runEmpty() }\n            }\n            Button("Cancel", role: .cancel) {}\n        case .error, .info:\n''',
+              '''        case .empty:\n            Button("Empty", role: .destructive) {\n                Task { await runEmpty() }\n            }\n            Button("Cancel", role: .cancel) {}\n        case .resetEntireDeck:\n            Button("Reset Entire Deck", role: .destructive) {\n                Task { await runResetEntireDeck() }\n            }\n            Button("Cancel", role: .cancel) {}\n        case .error, .info:\n'''
+          )
+
+          replace(
+              "AmgiApp/Sources/Decks/DeckDetail/DeckDetailView.swift",
+              '''        case .empty:\n            Text("Cards will be returned to their home decks.")\n        case .error(let msg), .info(let msg):\n''',
+              '''        case .empty:\n            Text("Cards will be returned to their home decks.")\n        case .resetEntireDeck:\n            Text("Every card in this deck will be reset to New. Existing review progress and scheduling will be cleared.")\n        case .error(let msg), .info(let msg):\n'''
+          )
+
+          replace(
+              "AmgiApp/Sources/Decks/DeckDetail/DeckDetailView.swift",
+              '''    func runEmpty() async {\n        if let err = await model.empty() {\n            destination = .alert(.error(err))\n        }\n    }\n\n    func runExport() async {\n''',
+              '''    func runEmpty() async {\n        if let err = await model.empty() {\n            destination = .alert(.error(err))\n        }\n    }\n\n    func runResetEntireDeck() async {\n        if let err = await model.resetEntireDeck() {\n            destination = .alert(.error(err))\n        } else {\n            destination = nil\n        }\n    }\n\n    func runExport() async {\n'''
+          )
+
+          replace(
+              "AmgiApp/Sources/Decks/DeckDetail/DeckDetailModel.swift",
+              '''    @ObservationIgnored @Dependency(\\.deckClient) private var deckClient\n    @ObservationIgnored @Dependency(\\.statsClient) private var statsClient\n''',
+              '''    @ObservationIgnored @Dependency(\\.deckClient) private var deckClient\n    @ObservationIgnored @Dependency(\\.deckResetClient) private var deckResetClient\n    @ObservationIgnored @Dependency(\\.statsClient) private var statsClient\n'''
+          )
+
+          replace(
+              "AmgiApp/Sources/Decks/DeckDetail/DeckDetailModel.swift",
+              '''    func exportDeck() async -> ExportOutcome {\n''',
+              '''    /// Resets all cards in this deck to New in a single logged backend operation.\n    /// Returns nil on success; otherwise an error message to surface.\n    func resetEntireDeck() async -> String? {\n        actionInFlight = true\n        defer { actionInFlight = false }\n        do {\n            _ = try await deckResetClient.resetEntireDeck(deck.name)\n            store.apply(CollectionChanges(card: true, studyQueues: true))\n            return nil\n        } catch {\n            return "Failed to reset deck: \\(error.localizedDescription)"\n        }\n    }\n\n    func exportDeck() async -> ExportOutcome {\n'''
+          )
+          PY
+
+      - name: Commit applied changes
+        id: commit
+        env:
+          BRANCH: agent/custom-study-tools
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-custom-study-tools.yml
+          git add \
+            AmgiApp/Sources/Review/ReviewSession.swift \
+            AmgiApp/Sources/Review/FlipContainer.swift \
+            AmgiApp/Sources/Browse/AddNoteView.swift \
+            AmgiApp/Sources/Browse/NoteEditorView.swift \
+            AmgiApp/Sources/Browse/PhotoAttachmentButton.swift \
+            AmgiApp/Sources/Decks/DeckDetail/DeckDetailDestination.swift \
+            AmgiApp/Sources/Decks/DeckDetail/DeckDetailView.swift \
+            AmgiApp/Sources/Decks/DeckDetail/DeckDetailModel.swift \
+            Sources/AnkiProtoBridge/Requests/CardSearchRequests.swift \
+            Sources/AnkiProtoBridge/Requests/MediaAddRequests.swift \
+            Sources/AnkiClients/MediaImportClient.swift \
+            Sources/AnkiClients/DeckResetClient.swift
+          git commit -m "feat: add media, deck reset, and instant review"
+          git push origin HEAD:"$BRANCH"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch iOS build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: agent/custom-study-tools
+        run: |
+          gh workflow run build-ipa.yml --ref "$BRANCH"
+          echo "Dispatched Build Unsigned IPA for $BRANCH at ${{ steps.commit.outputs.sha }}"
