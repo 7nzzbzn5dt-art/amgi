@@ -36,18 +36,35 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.95'
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
-
-      - name: Install Rust nightly with rust-src
-        run: rustup toolchain install nightly --profile minimal --component rust-src
+          targets: aarch64-apple-ios-sim
 
       - name: Install build dependencies
         run: brew install protobuf swift-protobuf xcodegen
 
-      - name: Build Rust XCFramework
+      - name: Build simulator Rust XCFramework
         run: |
-          chmod +x ./scripts/build-xcframework.sh
-          ./scripts/build-xcframework.sh
+          set -euo pipefail
+          export PROTOC="$(which protoc)"
+          export IPHONEOS_DEPLOYMENT_TARGET="17.0"
+          BRIDGE_DIR="$GITHUB_WORKSPACE/anki-bridge-rs"
+          HEADER_DIR="$BRIDGE_DIR/include"
+          SIM_LIB="$BRIDGE_DIR/target/aarch64-apple-ios-sim/release/libanki_bridge_ios.a"
+          cargo build \
+            --manifest-path "$BRIDGE_DIR/Cargo.toml" \
+            --target aarch64-apple-ios-sim \
+            --release
+          test -f "$SIM_LIB"
+          rm -rf "$GITHUB_WORKSPACE/AnkiRust.xcframework"
+          xcodebuild -create-xcframework \
+            -library "$SIM_LIB" -headers "$HEADER_DIR" \
+            -output "$GITHUB_WORKSPACE/AnkiRust.xcframework"
+          for HEADERS in "$GITHUB_WORKSPACE"/AnkiRust.xcframework/*/Headers; do
+            printf '%s\n' \
+              'module AnkiRustLib {' \
+              '    header "anki_bridge.h"' \
+              '    export *' \
+              '}' > "$HEADERS/module.modulemap"
+          done
 
       - name: Generate Swift protobuf types
         run: |
