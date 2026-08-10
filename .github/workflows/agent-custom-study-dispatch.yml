@@ -1,0 +1,49 @@
+name: Agent Custom Study Dispatcher
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  apply-and-dispatch:
+    if: github.event.issue.title == '[agent] apply custom study tools'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/custom-study-tools
+          fetch-depth: 0
+
+      - name: Extract and run patch payload
+        run: |
+          awk '
+            /python3 <<'"'"'PY'"'"'/ { capture=1; next }
+            capture && /^          PY$/ { capture=0; exit }
+            capture { sub(/^          /, ""); print }
+          ' .github/workflows/apply-custom-study-tools.yml > /tmp/apply.py
+          python3 /tmp/apply.py
+
+      - name: Commit feature implementation
+        id: commit
+        env:
+          BRANCH: agent/custom-study-tools
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-custom-study-tools.yml
+          git add -A
+          git commit -m "feat: add media, deck reset, and instant review"
+          git push origin HEAD:"$BRANCH"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch iOS build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: agent/custom-study-tools
+        run: |
+          gh workflow run build-ipa.yml --ref "$BRANCH"
+          echo "Dispatched build for ${{ steps.commit.outputs.sha }}"
