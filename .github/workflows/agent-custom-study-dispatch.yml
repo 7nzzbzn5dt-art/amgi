@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -99,3 +100,20 @@ jobs:
               -skipMacroValidation \
               2>&1 | tee simulator-build.log
           fi
+
+      - name: Report compile errors
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f simulator-build.log ]; then
+            {
+              echo 'Build failed. Relevant compiler output:'
+              echo '```text'
+              grep -E '(^|[ /])[^ ]+\.swift:[0-9]+:[0-9]+: (error|warning):| error: ' simulator-build.log | tail -n 100 || true
+              echo '```'
+            } > /tmp/build-comment.md
+          else
+            echo 'Build failed before the Xcode compile log was created.' > /tmp/build-comment.md
+          fi
+          gh pr comment 1 --repo "$GITHUB_REPOSITORY" --body-file /tmp/build-comment.md
