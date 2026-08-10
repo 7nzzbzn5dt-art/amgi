@@ -3,7 +3,7 @@ import AnkiKit
 import AnkiProtoBridge
 public import Dependencies
 import DependenciesMacros
-import Foundation
+public import Foundation
 
 @DependencyClient
 public struct MediaImportClient: Sendable {
@@ -14,9 +14,9 @@ extension MediaImportClient: DependencyKey {
     public static let liveValue: Self = {
         @Dependency(\.ankiBackend) var backend
         return Self(
-  add: { data, desiredName in
-      try await backend.invoke(.addMediaFile(data: data, desiredName: desiredName))
-  }
+            add: { data, desiredName in
+                try await backend.invoke(.addMediaFile(data: data, desiredName: desiredName))
+            }
         )
     }()
 }
