@@ -39,6 +39,15 @@ jobs:
           toolchain: '1.95'
           targets: aarch64-apple-ios-sim
 
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            anki-bridge-rs/target
+          key: ${{ runner.os }}-anki-rust-${{ hashFiles('anki-bridge-rs/Cargo.lock') }}
+
       - name: Install build dependencies
         run: brew install protobuf swift-protobuf xcodegen
 
