@@ -1,7 +1,7 @@
 name: Agent Custom Study Dispatcher
 
 on:
-  issues:
+  pull_request:
     types: [opened]
 
 permissions:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply-and-dispatch:
-    if: github.event.issue.title == '[agent] apply custom study tools'
+    if: github.event.pull_request.head.ref == 'agent/custom-study-tools'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
