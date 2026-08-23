@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - agent/custom-study-tools
+  pull_request:
+    branches:
+      - main
 
 concurrency:
   group: custom-ipa-${{ github.ref }}
