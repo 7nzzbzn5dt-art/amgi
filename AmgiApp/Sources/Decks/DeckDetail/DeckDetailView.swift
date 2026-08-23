@@ -48,6 +48,7 @@ struct DeckDetailView: View {
         guard let alert = currentAlert else { return "" }
         switch alert {
         case .empty: return "Empty \"\(shortTitle)\"?"
+        case .resetEntireDeck: return "Reset \"\(shortTitle)\"?"
         case .error: return "Something went wrong"
         case .info: return "Done"
         case .subdeck: return "Create Subdeck"
@@ -163,6 +164,13 @@ struct DeckDetailView: View {
                     }
                 }
                 Divider()
+                Button(role: .destructive) {
+                    destination = .alert(.resetEntireDeck)
+                } label: {
+                    Label("Reset Entire Deck", systemImage: "arrow.counterclockwise")
+                }
+                .disabled(model.actionInFlight || model.counts.total == 0)
+                Divider()
                 Button {
                     destination = .importer
                 } label: {
@@ -244,6 +252,11 @@ private extension DeckDetailView {
                 Task { await runEmpty() }
             }
             Button("Cancel", role: .cancel) {}
+        case .resetEntireDeck:
+            Button("Reset Entire Deck", role: .destructive) {
+                Task { await runResetEntireDeck() }
+            }
+            Button("Cancel", role: .cancel) {}
         case .error, .info:
             Button("OK", role: .cancel) {}
         case .subdeck:
@@ -266,6 +279,8 @@ private extension DeckDetailView {
         switch alert {
         case .empty:
             Text("Cards will be returned to their home decks.")
+        case .resetEntireDeck:
+            Text("Every card in this deck will be reset to New. Existing review progress and scheduling will be cleared.")
         case .error(let msg), .info(let msg):
             Text(msg)
         case .subdeck:
@@ -286,6 +301,14 @@ private extension DeckDetailView {
     func runEmpty() async {
         if let err = await model.empty() {
             destination = .alert(.error(err))
+        }
+    }
+
+    func runResetEntireDeck() async {
+        if let err = await model.resetEntireDeck() {
+            destination = .alert(.error(err))
+        } else {
+            destination = nil
         }
     }
 

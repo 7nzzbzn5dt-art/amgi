@@ -28,6 +28,7 @@ final class DeckDetailModel {
     var importInProgress = false
 
     @ObservationIgnored @Dependency(\.deckClient) private var deckClient
+    @ObservationIgnored @Dependency(\.deckResetClient) private var deckResetClient
     @ObservationIgnored @Dependency(\.statsClient) private var statsClient
     @ObservationIgnored @Dependency(\.collectionStore) private var store
     @ObservationIgnored private var statsTask: Task<Void, Never>?
@@ -115,6 +116,20 @@ final class DeckDetailModel {
             return nil
         } catch {
             return error.localizedDescription
+        }
+    }
+
+    /// Resets all cards in this deck to New in a single logged backend operation.
+    /// Returns nil on success; otherwise an error message to surface.
+    func resetEntireDeck() async -> String? {
+        actionInFlight = true
+        defer { actionInFlight = false }
+        do {
+            _ = try await deckResetClient.resetEntireDeck(deck.name)
+            store.apply(CollectionChanges(card: true, studyQueues: true))
+            return nil
+        } catch {
+            return "Failed to reset deck: \(error.localizedDescription)"
         }
     }
 

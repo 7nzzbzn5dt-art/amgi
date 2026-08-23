@@ -187,9 +187,6 @@ final class ReviewSession {
                 isAdvancing = false
                 pendingToast = nil
             }
-            // The toast stays up at least this long; the next card appears
-            // after max(backend round-trip, toast display).
-            let minToastDisplay = Task { try? await Task.sleep(for: .milliseconds(450)) }
             do {
                 let queue = try await Task.detached {
                     try scheduler.answerReviewCard(cardId, rating, timeSpent, states)
@@ -208,12 +205,10 @@ final class ReviewSession {
                     learnCount: queue.learningCount,
                     reviewCount: queue.reviewCount
                 )
-                await minToastDisplay.value
                 await advanceToNextCard(notes: notes, notetypes: notetypes, notetypesClient: notetypesClient, cardRendering: cardRendering)
             } catch {
                 print("[ReviewSession] Answer failed: \(error)")
                 if !cardQueue.isEmpty { cardQueue.removeFirst() }
-                await minToastDisplay.value
                 await advanceToNextCard(notes: notes, notetypes: notetypes, notetypesClient: notetypesClient, cardRendering: cardRendering)
             }
         }
